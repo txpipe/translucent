@@ -246,7 +246,7 @@ export class Tx {
       let valueBuilder = outputBuilder.next();
       let assetsC = assetsToValue(assets);
       let params = this.translucent.provider
-        ? await this.translucent.provider.getProtocolParameters()
+        ? await this.translucent.getProtocolParameters()
         : PROTOCOL_PARAMETERS_DEFAULT;
       {
         let masset = assetsC.multiasset() || C.MultiAsset.new();
@@ -312,7 +312,7 @@ export class Tx {
       let valueBuilder = outputBuilder.next();
       let assetsC = assetsToValue(assets);
       let params = this.translucent.provider
-        ? await this.translucent.provider.getProtocolParameters()
+        ? await this.translucent.getProtocolParameters()
         : PROTOCOL_PARAMETERS_DEFAULT;
       {
         let masset = assetsC.multiasset() || C.MultiAsset.new();
@@ -787,6 +787,8 @@ export class Tx {
   async complete(options?: {
     change?: { address?: Address; outputData?: OutputData };
     coinSelection?: boolean;
+    overEstimateMem?: number;
+    overEstimateSteps?: number;
   }): Promise<TxComplete> {
     if (
       [
@@ -861,7 +863,7 @@ export class Tx {
         );
         let amtBuilder = minCollateralOutput.next();
         let params = this.translucent.provider
-          ? await this.translucent.provider.getProtocolParameters()
+          ? await this.translucent.getProtocolParameters()
           : PROTOCOL_PARAMETERS_DEFAULT;
         let multiAsset = foundUtxo.output().amount().multiasset();
         amtBuilder = amtBuilder.with_asset_and_min_required_coin(
@@ -880,7 +882,7 @@ export class Tx {
     let protocolParameters: ProtocolParameters;
     try {
       protocolParameters =
-        await this.translucent.provider.getProtocolParameters();
+        await this.translucent.getProtocolParameters();
     } catch {
       protocolParameters = PROTOCOL_PARAMETERS_DEFAULT;
     }
@@ -918,8 +920,8 @@ export class Tx {
       allUtxos.map((x) => x.input().to_bytes()),
       allUtxos.map((x) => x.output().to_bytes()),
       costMdls.to_bytes(),
-      protocolParameters.maxTxExSteps,
-      protocolParameters.maxTxExMem,
+      BigInt(Math.floor(Number(protocolParameters.maxTxExSteps) / (options?.overEstimateSteps ?? 1))),
+      BigInt(Math.floor(Number(protocolParameters.maxTxExMem) / (options?.overEstimateMem ?? 1))),
       BigInt(slotConfig.zeroTime),
       BigInt(slotConfig.zeroSlot),
       slotConfig.slotLength,
@@ -927,10 +929,24 @@ export class Tx {
     const redeemers = C.Redeemers.new()
     for (const redeemerBytes of uplcResults) {
       let redeemer: C.Redeemer = C.Redeemer.from_bytes(redeemerBytes);
+      const exUnits = C.ExUnits.new(
+        C.BigNum.from_str(
+          Math.floor(
+            parseInt(redeemer.ex_units().mem().to_str()) *
+            (options?.overEstimateMem ?? 1),
+          ).toString(),
+        ),
+        C.BigNum.from_str(
+          Math.floor(
+            parseInt(redeemer.ex_units().steps().to_str()) *
+            (options?.overEstimateSteps ?? 1),
+          ).toString(),
+        ),
+      )
       this.txBuilder.set_exunits(
         C.RedeemerWitnessKey.new(redeemer.tag(), redeemer.index()),
-        redeemer.ex_units(),
-      );
+        exUnits,
+      )
       redeemers.add(redeemer)
     }
     let builtTx = this.txBuilder.build(0, changeAddress).build_unchecked();
@@ -963,11 +979,13 @@ export class Tx {
       }
       const languages = C.Languages.new()
       languages.add(C.Language.new_plutus_v2())
-      const sdh = C.calc_script_data_hash(redeemers, datums, costMdls, languages)
-      if (sdh){
-        const bodyWithDataHash = builtTx.body()
-        bodyWithDataHash.set_script_data_hash(sdh)
-        builtTx = C.Transaction.new(bodyWithDataHash, builtTx.witness_set(), builtTx.auxiliary_data())
+      if (builtTx.witness_set().redeemers()) {
+        const sdh = C.calc_script_data_hash(builtTx.witness_set().redeemers()!, datums, costMdls, languages)
+        if (sdh){
+          const bodyWithDataHash = builtTx.body()
+          bodyWithDataHash.set_script_data_hash(sdh)
+          builtTx = C.Transaction.new(bodyWithDataHash, builtTx.witness_set(), builtTx.auxiliary_data())
+        }
       }
     }
     return new TxComplete(this.translucent, builtTx);
